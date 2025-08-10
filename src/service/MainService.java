@@ -11,15 +11,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.*;
-
+import java.util.concurrent.locks.ReentrantLock;
 
 public class MainService {
     ArrayList<Card> cards = new ArrayList<>();
     public User currentUser;
+    private final ReentrantLock fileLock = new ReentrantLock();
 
     ExecutorService executorService = Executors.newFixedThreadPool(12);
 
-        public Optional<User> getCurrentUser() {
+    public Optional<User> getCurrentUser() {
             return Optional.ofNullable(currentUser);
         }
 
@@ -93,7 +94,6 @@ public class MainService {
                 }
             }
 
-            // create user
             User user = new User(userRecord.userName(), userRecord.password(), userRecord.phoneNumber());
 
             try (FileWriter fileWriter = new FileWriter("io/UserData.txt", true)) {
@@ -139,7 +139,7 @@ public class MainService {
                 String line;
                 while ((line = br.readLine()) != null) {
                     String[] data = line.trim().split("#");
-                    if (data.length < 3) continue; // если данных меньше чем нужно — пропускаем
+                    if (data.length < 3) continue;
 
                     String phoneNumber = data[2];
                     String password = data[1];
@@ -147,7 +147,6 @@ public class MainService {
                     if (phoneNumber.equals(loginRecord.phoneNumber()) && password.equals(loginRecord.password())) {
                         String userName = data[0];
 
-                        // начиная с индекса 3 — каждые 3 элемента это карта
                         for (int i = 3; i + 2 < data.length; i += 3) {
                             String cardNumber = data[i];
                             String expireDate = data[i + 1];
@@ -156,6 +155,7 @@ public class MainService {
                         }
 
                         User user = new User(userName, password, phoneNumber, cards);
+                        setCurrentUser(user);
 
                         return Optional.of(user.getUserName());
                     }
@@ -193,7 +193,6 @@ public class MainService {
 
     public Optional<String> addCreditCard(AddCardRecord addCardRecord) {
         try {
-            // Проверка длины карты
             Future<Optional<String>> checkCardF = executorService.submit(() -> {
                 if (addCardRecord.cardNumber().length() != 16) {
                     return Optional.of("❌ Card number must be 16 digits");
@@ -209,7 +208,6 @@ public class MainService {
 
             Card newCard = new Card(addCardRecord.cardNumber(), addCardRecord.expireDate(), 0);
 
-            // Проверка на существующую карту
             Future<Optional<String>> existingCardErrorF = executorService.submit(() -> {
                 try (BufferedReader bufferedReader = new BufferedReader(new FileReader("io/UserData.txt"))) {
                     String line;
@@ -229,7 +227,6 @@ public class MainService {
                 return existingCardError;
             }
 
-            // Добавление в список карт текущего пользователя
             if (currentUser.getCards() == null) {
                 currentUser.setCards(new ArrayList<>());
             }
@@ -259,70 +256,107 @@ public class MainService {
         }
     }
 
-
     public void sendCash(String senderCardNumber, String receiverCardNumber, double cash) {
+        fileLock.lock();
+
         try {
-            // 1. Проверка баланса отправителя
+            boolean senderHasEnough = false;
 
-            boolean hasEnough = false;
-
-            for (Card card : currentUser.getCards()) {
-                if (card.getCardNumber().equals(senderCardNumber) && card.getAmount() >= cash) {
-                    hasEnough = true;
-                    card.setAmount(card.getAmount() - cash);
-                    break;
-                }
-            }
-
-            if (!hasEnough) {
-                System.out.println("❌ Недостаточно средств!");
-                return;
-            }
-
-            // 2. Читаем весь файл в память
             List<String> lines = new ArrayList<>();
+
             try (BufferedReader reader = new BufferedReader(new FileReader("io/UserData.txt"))) {
                 String line;
 
                 while ((line = reader.readLine()) != null) {
                     String[] data = line.split("#");
 
-                    // обновляем баланс получателя
-                    if (data.length >= 6 && data[3].equals(receiverCardNumber)) {
-                        double oldAmount = Double.parseDouble(data[5]);
-                        double newAmount = oldAmount + cash;
-                        data[5] = String.valueOf(newAmount);
-                        line = String.join("#", data);
-                    }
-
-                    // обновляем баланс отправителя
                     if (data.length >= 6 && data[3].equals(senderCardNumber)) {
-                        double oldAmount = Double.parseDouble(data[5]);
-                        double newAmount = oldAmount - cash;
-                        data[5] = String.valueOf(newAmount);
-                        line = String.join("#", data);
-                    }
+                        double amount = Double.parseDouble(data[5]);
+                        if (amount >= cash) {
+                            amount -= cash;
+                            data[5] = String.valueOf(amount);
+                            senderHasEnough = true;
 
+                            line = String.join("#", data);
+                        } else {
+                            System.out.println("❌ Недостаточно средств на карте отправителя!");
+                            return;
+                        }
+                    }
                     lines.add(line);
                 }
             }
 
-            // 3. Перезаписываем файл
+            if (!senderHasEnough) {
+                System.out.println("❌ Карта отправителя не найдена!");
+                return;
+            }
+
+            boolean receiverFound = false;
+            List<String> updatedLines = new ArrayList<>();
+
+            for (String l : lines) {
+                String[] data = l.split("#");
+
+                if (data.length >= 6 && data[3].equals(receiverCardNumber)) {
+                    double amount = Double.parseDouble(data[5]);
+                    amount += cash;
+                    data[5] = String.valueOf(amount);
+                    l = String.join("#", data);
+                    receiverFound = true;
+                }
+                updatedLines.add(l);
+            }
+
+            if (!receiverFound) {
+                System.out.println("❌ Карта получателя не найдена!");
+                return;
+            }
+
             try (BufferedWriter writer = new BufferedWriter(new FileWriter("io/UserData.txt"))) {
-                for (String updatedLine : lines) {
+                for (String updatedLine : updatedLines) {
                     writer.write(updatedLine);
                     writer.newLine();
                 }
             }
 
+            reloadCurrentUser();
+
             System.out.println("✅ Перевод выполнен успешно!");
+
         } catch (IOException e) {
             e.printStackTrace();
+            System.out.println("❌ Ошибка при работе с файлом.");
+        } finally {
+            fileLock.unlock();
         }
     }
 
+    public void reloadCurrentUser() throws IOException {
+        String phone = currentUser.getPhoneNumber();
+        try (BufferedReader br = new BufferedReader(new FileReader("io/UserData.txt"))) {
+            String line;
+
+            while ((line = br.readLine()) != null) {
+                String[] data = line.split("#");
+                if (data.length >= 3 && data[2].equals(phone)) {
+                    // Создаем список карт из данных
+                    ArrayList<Card> cards = new ArrayList<>();
+                    for (int i = 3; i + 2 < data.length; i += 3) {
+                        String cardNum = data[i];
+                        String expire = data[i + 1];
+                        double amount = Double.parseDouble(data[i + 2]);
+                        cards.add(new Card(cardNum, expire, amount));
+                    }
+                    currentUser.setCards(cards);
+                    break;
+                }
+            }
+        }
+    }
 
     // База данных
+
     {
         Card card = new Card("000000000000", "00/00", 1000);
         cards.add(card);

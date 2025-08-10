@@ -80,7 +80,7 @@ public class MainController {
         LoginRecord loginRecord = new LoginRecord(phoneNumber, password);
         Optional<String> response = mainService.loginUser(loginRecord);
 
-        if (response.isPresent() && response.get().equals("response")) {
+        if (response.isPresent()) {
             loginAttempts = 0; // сброс при успешном входе
             System.out.println("✅ Logged in");
             MainMenu();
@@ -89,8 +89,8 @@ public class MainController {
             System.out.println(response.orElse("User not found! (attempt " + loginAttempts + ")"));
 
             if (loginAttempts >= 3) {
-                loginAttempts = 0; // сбрасываем счётчик (или оставить, как тебе логика)
-                lockUntilMillis = System.currentTimeMillis() + 30_000; // 30 секунд блокировки
+                loginAttempts = 0;
+                lockUntilMillis = System.currentTimeMillis() + 30_000;
                 System.out.println("❌ Too many attempts — blocked for 30 seconds.");
             }
         }
@@ -182,8 +182,6 @@ public class MainController {
 
         double cash = Util.getNumber("\"\uD83D\uDCB5 Enter amount to send:\"");
 
-        // Вызываем сервис
         mainService.sendCash(senderCardNumber, receiverCardNumber, cash);
     }
-
 }
